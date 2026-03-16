@@ -1,30 +1,32 @@
 """
-faq_generator.py — Stages 8, 9, 10: FAQ Generation
-  Stage 8: Canonical question selection (highest mean cosine similarity to cluster).
-  Stage 9: Answer extraction (most frequent; fallback to longest for diversity).
-  Stage 10: Final FAQ dataset assembly, sorted by support_count.
+faq_generator.py — Stages 8–10: FAQ Group Generation
+
+Groups pre-extracted canonical FAQ pairs (from llm_extractor.py) by cluster.
+Each cluster becomes a named group with a full list of {question, answer} FAQs.
+
+Stage 8: LLM topic naming via topic_namer.name_cluster().
+Stage 9: Sort FAQs within group by centroid proximity (most representative first).
+Stage 10: Assemble final group output.
 """
 
 import logging
 import sys
 import os
-from collections import Counter
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from backend.config import (
-    ANSWER_MIN_LENGTH,
     FIELD_ANSWER,
     FIELD_CLEAN_QUESTION,
     FIELD_CLUSTER_ID,
-    FIELD_DUPLICATE_COUNT,
     FIELD_QUESTION,
     LOG_FORMAT,
     LOG_DATE_FORMAT,
     LOG_LEVEL,
+    REPRESENTATIVE_Q_COUNT,
 )
 from backend.embedding_service import l2_normalize
 
@@ -32,124 +34,125 @@ logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
 logger = logging.getLogger(__name__)
 
 
-def _select_canonical_question(
-    questions: list[str],
-    clean_questions: list[str],
+def _sort_faqs_by_centrality(
+    faqs: list[dict],
     cluster_embs: np.ndarray,
-) -> str:
+) -> list[dict]:
     """
-    Stage 8: Find the question with the highest average cosine similarity
-    to all other questions in the cluster.
+    Sort FAQ pairs so the most representative (closest to centroid) appear first.
+    This makes the top entries in each group the "canonical" FAQs for that topic.
+    """
+    if len(faqs) <= 1:
+        return faqs
 
-    Returns the original (display) question for the chosen representative.
-    """
     norm_embs = l2_normalize(cluster_embs)
-    n = len(norm_embs)
+    centroid = norm_embs.mean(axis=0)
+    centroid = centroid / (np.linalg.norm(centroid) + 1e-10)
+    sims = norm_embs @ centroid  # cosine similarity to centroid
 
-    if n == 1:
-        return questions[0]
-
-    # Pairwise cosine similarity matrix
-    sim_matrix = norm_embs @ norm_embs.T  # (n, n)
-
-    # Mean similarity excluding self (diagonal)
-    np.fill_diagonal(sim_matrix, 0.0)
-    mean_sims = sim_matrix.sum(axis=1) / (n - 1)
-
-    best_idx = int(np.argmax(mean_sims))
-    return clean_questions[best_idx]  # Return the cleaned question as the FAQ question
+    sorted_pairs = sorted(zip(sims, faqs), key=lambda x: -x[0])
+    return [pair for _, pair in sorted_pairs]
 
 
-def _select_best_answer(answers: list[str]) -> str:
+def generate_groups(
+    df: pd.DataFrame,
+    full_embeddings: np.ndarray,
+    name_fn: Callable[[list[str], int], str],
+) -> list[dict[str, Any]]:
     """
-    Stage 9: Select the best admin answer for a cluster.
+    Produce the canonical group output list from clustered extracted FAQ pairs.
 
-    Strategy:
-    1. Normalise answers (strip whitespace, lower for comparison).
-    2. Pick the most frequent answer.
-    3. If all unique → return the longest answer (most informative).
+    Args:
+        df:              DataFrame with: question, clean_question, answer, cluster_id.
+                         Each row is a pre-extracted FAQ pair (from llm_extractor).
+        full_embeddings: Full-dim (1024-dim) embeddings for each row in df.
+        name_fn:         Callable(questions, cluster_idx) → str for LLM group naming.
 
-    Returns the original-case most representative answer.
+    Returns:
+        List of group dicts sorted by total_faqs descending:
+        [
+          {
+            "group_id":   int,
+            "group_name": str,        ← LLM-generated (e.g. "ปัญหาการเข้าระบบ MT5")
+            "total_faqs": int,
+            "faqs": [
+              {"question": str, "answer": str},   ← real Q&A pairs
+              ...
+            ],
+            # Legacy compat fields for the existing frontend/FAISS:
+            "representative_questions": list[str],
+            "suggested_admin_reply":    str,
+            "total_questions":          int,
+            "support_count":            int,
+            "faq_question":             str,
+            "faq_answer":               str,
+            "cluster_id":               int,
+          }
+        ]
     """
-    # Filter empty / too-short answers
-    valid = [a for a in answers if isinstance(a, str) and len(a.strip()) >= ANSWER_MIN_LENGTH]
-    if not valid:
-        return answers[0] if answers else ""
+    groups: list[dict] = []
+    unique_clusters = sorted([c for c in df[FIELD_CLUSTER_ID].unique() if c != -1])
 
-    # Normalise for counting
-    normalised = [a.strip().lower() for a in valid]
-    counts = Counter(normalised)
-    most_common_norm, top_count = counts.most_common(1)[0]
+    logger.info(f"Stages 8–10: Generating groups for {len(unique_clusters)} clusters …")
 
-    if top_count > 1:
-        # Return the original-case version of the most common answer
-        for orig in valid:
-            if orig.strip().lower() == most_common_norm:
-                return orig.strip()
+    for idx, cluster_id in enumerate(unique_clusters):
+        mask = df[FIELD_CLUSTER_ID] == cluster_id
+        cluster_df = df[mask].copy()
+        cluster_embs = full_embeddings[mask.values]
 
-    # All unique → return the longest (most detailed) answer
-    return max(valid, key=len).strip()
+        # Collect Q&A pairs for this cluster
+        raw_faqs = [
+            {"question": row[FIELD_QUESTION], "answer": row[FIELD_ANSWER]}
+            for _, row in cluster_df.iterrows()
+        ]
+        questions = cluster_df[FIELD_CLEAN_QUESTION].tolist()
+
+        # Stage 8: LLM-generated abstract group name
+        group_name = name_fn(questions, idx)
+
+        # Stage 9: Sort FAQs by centrality (most representative first)
+        sorted_faqs = _sort_faqs_by_centrality(raw_faqs, cluster_embs)
+
+        # Representative questions = top REPRESENTATIVE_Q_COUNT for FAISS
+        representative_questions = [f["question"] for f in sorted_faqs[:REPRESENTATIVE_Q_COUNT]]
+        # Suggested reply = answer of the most representative FAQ
+        suggested_admin_reply = sorted_faqs[0]["answer"] if sorted_faqs else ""
+
+        groups.append(
+            {
+                "group_id": int(cluster_id),
+                "group_name": group_name,
+                "total_faqs": len(sorted_faqs),
+                "faqs": sorted_faqs,
+                # Legacy / backwards-compat fields (frontend + FAISS expect these)
+                "representative_questions": representative_questions,
+                "suggested_admin_reply": suggested_admin_reply,
+                "total_questions": len(sorted_faqs),
+                "support_count": len(sorted_faqs),
+                "faq_question": group_name,
+                "faq_answer": suggested_admin_reply,
+                "cluster_id": int(cluster_id),
+            }
+        )
+
+    # Sort by group size descending
+    groups.sort(key=lambda x: x["total_faqs"], reverse=True)
+
+    # Re-assign sequential group_ids after sort
+    for new_id, g in enumerate(groups):
+        g["group_id"] = new_id
+
+    logger.info(
+        f"Stages 8–10 complete: {len(groups)} groups, "
+        f"{sum(g['total_faqs'] for g in groups)} total FAQ pairs."
+    )
+    return groups
 
 
 def generate_faqs(
     df: pd.DataFrame,
     embeddings: np.ndarray,
 ) -> list[dict[str, Any]]:
-    """
-    Stages 8–10 entry point.
-
-    Args:
-        df: DataFrame with columns: question, clean_question, answer,
-            cluster_id, (optionally) duplicate_count.
-        embeddings: Raw float32 embeddings matching df rows.
-
-    Returns:
-        List of FAQ dicts sorted by support_count descending:
-        [{
-            "faq_question": str,
-            "faq_answer": str,
-            "support_count": int,
-            "cluster_id": int,
-        }]
-    """
-    faqs: list[dict] = []
-    unique_clusters = sorted([c for c in df[FIELD_CLUSTER_ID].unique() if c != -1])
-
-    logger.info(f"Stages 8-10: Generating FAQs for {len(unique_clusters)} clusters …")
-
-    for cluster_id in unique_clusters:
-        mask = df[FIELD_CLUSTER_ID] == cluster_id
-        cluster_df = df[mask].copy()
-        cluster_embs = embeddings[mask.values]
-
-        questions = cluster_df[FIELD_QUESTION].tolist()
-        clean_questions = cluster_df[FIELD_CLEAN_QUESTION].tolist()
-        answers = cluster_df[FIELD_ANSWER].tolist()
-
-        # Stage 8: canonical question
-        faq_question = _select_canonical_question(questions, clean_questions, cluster_embs)
-
-        # Stage 9: best answer
-        faq_answer = _select_best_answer(answers)
-
-        # Stage 10: support count = cluster size + all duplicates that fed into it
-        base_count = len(cluster_df)
-        extra_dupes = 0
-        if FIELD_DUPLICATE_COUNT in cluster_df.columns:
-            extra_dupes = cluster_df[FIELD_DUPLICATE_COUNT].sum()
-        support_count = base_count + int(extra_dupes)
-
-        faqs.append(
-            {
-                "faq_question": faq_question,
-                "faq_answer": faq_answer,
-                "support_count": support_count,
-                "cluster_id": int(cluster_id),
-            }
-        )
-
-    # Stage 10: sort by support_count descending (most requested first)
-    faqs.sort(key=lambda x: x["support_count"], reverse=True)
-
-    logger.info(f"Stage 10 complete: {len(faqs)} FAQs generated.")
-    return faqs
+    """Backwards-compat wrapper using the mock topic namer."""
+    from backend.topic_namer import build_namer_fn
+    return generate_groups(df, embeddings, build_namer_fn())

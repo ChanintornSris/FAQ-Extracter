@@ -120,7 +120,7 @@ def set_pipeline_state(faq_index, faqs, analytics, valid_questions, valid_embedd
     _analytics_report = analytics
     _valid_questions = valid_questions
     _valid_embeddings = valid_embeddings
-    logger.info(f"API state updated: {len(_faqs)} FAQs, {len(_valid_questions)} historical questions.")
+    logger.info(f"API state updated: {len(_faqs)} groups, {len(_valid_questions)} historical questions.")
 
 
 # ── Pipeline Runner (runs in a background thread) ─────────────────────────────
@@ -149,78 +149,100 @@ def _run_pipeline_thread(input_file: str):
         if len(valid_df) == 0:
             raise RuntimeError("No valid questions after filtering. Check your dataset.")
 
-        _log("Stage 4: Generating sentence embeddings…", stage=4, stage_name="Generating embeddings")
-        from backend.embedding_service import generate_embeddings
+        _log("Stage 3.5: LLM Batch FAQ extraction (Ollama/Typhoon)…", stage=3, stage_name="LLM FAQ extraction")
+        from backend.llm_extractor import extract_all_faqs
+        from backend.config import FAQ_EXTRACTION_BATCH_SIZE
+        faq_df = extract_all_faqs(valid_df, batch_size=FAQ_EXTRACTION_BATCH_SIZE)
+        if len(faq_df) == 0:
+            raise RuntimeError(
+                "No FAQ pairs extracted. Ensure Ollama is running and the model is loaded."
+            )
+        _log(f"  → {len(faq_df)} canonical FAQ pairs extracted.")
+
+        _log("Stage 4: Embedding extracted FAQ questions (bge-m3)…", stage=4, stage_name="Generating embeddings")
+        from backend.embedding_service import generate_embeddings, l2_normalize
         from backend.config import EMBEDDINGS_CACHE_FILE, EMBEDDINGS_IDS_CACHE_FILE
-        embeddings, valid_df = generate_embeddings(
-            valid_df, use_cache=True,
+        full_embeddings, faq_df = generate_embeddings(
+            faq_df, use_cache=True,
             cache_file=EMBEDDINGS_CACHE_FILE,
             ids_cache_file=EMBEDDINGS_IDS_CACHE_FILE,
         )
-        _log(f"  → Embeddings shape: {embeddings.shape}")
+        _log(f"  → Embeddings shape: {full_embeddings.shape}")
 
-        _log("Stage 5: Deduplicating questions…", stage=5, stage_name="Deduplicating")
+        _log("Stage 4.5: UMAP dimensionality reduction…", stage=4, stage_name="UMAP reduction")
+        from backend.umap_reducer import reduce_dimensions
+        from backend.config import UMAP_CACHE_FILE, UMAP_PARAMS_CACHE_FILE
+        reduced_embeddings = reduce_dimensions(
+            full_embeddings, use_cache=True,
+            cache_file=UMAP_CACHE_FILE,
+            params_cache_file=UMAP_PARAMS_CACHE_FILE,
+        )
+        _log(f"  → Reduced shape: {reduced_embeddings.shape}")
+
+        _log("Stage 5: Deduplicating extracted FAQs…", stage=5, stage_name="Deduplicating")
         from backend.deduplication import deduplicate
-        unique_df, full_df_with_flags = deduplicate(valid_df, embeddings)
-        unique_mask = ~full_df_with_flags["is_duplicate"].values
-        unique_embeddings = embeddings[unique_mask]
-        _log(f"  → {len(unique_df)} unique questions after dedup.")
+        unique_faq_df, full_faq_flags = deduplicate(faq_df, full_embeddings)
+        unique_mask = ~full_faq_flags["is_duplicate"].values
+        unique_full_embs = full_embeddings[unique_mask]
+        unique_reduced_embs = reduced_embeddings[unique_mask]
+        _log(f"  → {len(unique_faq_df)} unique FAQ pairs after dedup.")
 
-        if len(unique_df) == 0:
-            raise RuntimeError("All questions were deduplicated. Adjust dedup threshold.")
+        if len(unique_faq_df) == 0:
+            raise RuntimeError("All extracted FAQs were deduplicated. Lower FAQ_DEDUP_SIMILARITY_THRESHOLD.")
 
-        _log("Stage 6: Clustering with HDBSCAN…", stage=6, stage_name="HDBSCAN clustering")
+        _log("Stage 6: Clustering with HDBSCAN (UMAP space)…", stage=6, stage_name="HDBSCAN clustering")
         from backend.clustering import run_clustering
-        clustered_df = run_clustering(unique_df, unique_embeddings)
+        clustered_df = run_clustering(unique_faq_df, unique_reduced_embs)
 
         _log("Stage 7: Filtering cluster quality…", stage=7, stage_name="Cluster quality filter")
         from backend.clustering import filter_clusters
-        clustered_df = filter_clusters(clustered_df, unique_embeddings)
-        n_clusters = clustered_df["cluster_id"].nunique() if len(clustered_df) > 0 else 0
+        clustered_df = filter_clusters(clustered_df, unique_reduced_embs)
+        n_clusters = len([c for c in clustered_df["cluster_id"].unique() if c != -1])
         _log(f"  → {n_clusters} quality clusters retained.")
 
-        _log("Stages 8–10: Generating FAQs…", stage=8, stage_name="FAQ generation")
-        from backend.faq_generator import generate_faqs
-        faqs = generate_faqs(clustered_df, unique_embeddings)
-        _log(f"  → {len(faqs)} FAQs generated.")
+        _log("Stages 8–10: LLM group naming & FAQ group assembly…", stage=8, stage_name="Group generation")
+        from backend.topic_namer import build_namer_fn
+        from backend.faq_generator import generate_groups
+        name_fn = build_namer_fn()
+        groups = generate_groups(clustered_df, unique_full_embs, name_fn)
+        total_faq_pairs = sum(g.get("total_faqs", 0) for g in groups)
+        _log(f"  → {len(groups)} groups, {total_faq_pairs} FAQ pairs total.")
 
         _log("Stage 11: Building FAISS search index…", stage=11, stage_name="Building search index")
         from backend.search_index import FAQSearchIndex
         faq_index = FAQSearchIndex()
-        if faqs:
-            faq_index.build(faqs)
+        if groups:
+            faq_index.build(groups)
             faq_index.save()
 
-        _log("Saving FAQ dataset…", stage=12, stage_name="Saving outputs")
+        _log("Saving outputs…", stage=12, stage_name="Saving outputs")
         os.makedirs(os.path.dirname(FAQ_OUTPUT_FILE), exist_ok=True)
         with open(FAQ_OUTPUT_FILE, "w", encoding="utf-8") as f:
-            json.dump(faqs, f, ensure_ascii=False, indent=2)
+            json.dump({"total_groups": len(groups), "groups": groups}, f, ensure_ascii=False, indent=2)
 
         _log("Stage 13: Running analytics…", stage=13, stage_name="Analytics")
         from backend.analytics import generate_analytics
-        analytics = generate_analytics(raw_df, full_df_with_flags, unique_df, clustered_df, faqs)
+        analytics = generate_analytics(raw_df, full_faq_flags, unique_faq_df, clustered_df, groups)
         os.makedirs(os.path.dirname(ANALYTICS_OUTPUT_FILE), exist_ok=True)
         with open(ANALYTICS_OUTPUT_FILE, "w", encoding="utf-8") as f:
             json.dump(analytics, f, ensure_ascii=False, indent=2)
 
-        # Inject results into global API state
-        valid_questions = valid_df["clean_question"].tolist()
-        from backend.embedding_service import l2_normalize
-        valid_embs = l2_normalize(embeddings)
-        set_pipeline_state(faq_index, faqs, analytics, valid_questions, valid_embs)
+        # Inject into API state — expose canonical FAQ questions for /similar_questions
+        valid_questions = unique_faq_df["clean_question"].tolist()
+        valid_embs = l2_normalize(unique_full_embs)
+        set_pipeline_state(faq_index, groups, analytics, valid_questions, valid_embs)
 
-        # Zero-Effect Optimization: Aggressively free memory of large DataFrames
         import gc
         try:
-            del raw_df, valid_df, embeddings, unique_df, full_df_with_flags, clustered_df
+            del raw_df, valid_df, faq_df, full_embeddings, reduced_embeddings, unique_faq_df, full_faq_flags, clustered_df
         except UnboundLocalError:
             pass
         gc.collect()
 
-        _log(f"✅ Pipeline complete! {len(faqs)} FAQs generated.")
+        _log(f"✅ Pipeline complete! {len(groups)} groups, {total_faq_pairs} FAQ pairs.")
         with _pipeline_lock:
             _pipeline_state["status"] = "done"
-            _pipeline_state["faq_count"] = len(faqs)
+            _pipeline_state["faq_count"] = len(groups)
             _pipeline_state["finished_at"] = time.time()
 
     except Exception as exc:
@@ -536,10 +558,22 @@ def create_app() -> FastAPI:
         snap["elapsed_seconds"] = elapsed
         return snap
 
-    # ── FAQ Endpoints ─────────────────────────────────────────────────────────
+    # ── FAQ / Group Endpoints ─────────────────────────────────────────────────
+
+    @app.get("/groups", tags=["FAQs"])
+    async def get_groups(limit: int = Query(default=100, ge=1, le=10000)):
+        """
+        Return FAQ groups in the canonical new schema:
+        { total_groups, groups: [{group_id, group_name, total_questions,
+          representative_questions, suggested_admin_reply}] }
+        """
+        _require_index()
+        groups = _faq_index.groups[:limit]
+        return {"total_groups": len(_faq_index.groups), "groups": groups}
 
     @app.get("/faqs", tags=["FAQs"])
     async def get_faqs(limit: int = Query(default=100, ge=1, le=10000)):
+        """Backwards-compatible FAQ list. Also exposes group_name field."""
         _require_index()
         return {"faqs": _faqs[:limit], "total": len(_faqs)}
 
@@ -589,8 +623,9 @@ def create_app() -> FastAPI:
         try:
             from backend.embedding_service import encode_texts, l2_normalize
 
-            questions  = [f.get("faq_question", "") for f in _faqs]
-            raw_embs   = encode_texts(questions)       # (n, D)
+            # Use group_name as the text to visualise; fall back to faq_question for compat
+            labels     = [f.get("group_name") or f.get("faq_question", "") for f in _faqs]
+            raw_embs   = encode_texts(labels)          # (n, D)
             norm_embs  = l2_normalize(raw_embs)        # L2-normalise for cosine
             coords_3d  = _pca_3d(norm_embs)            # (n, 3) via SVD PCA
 
@@ -599,10 +634,10 @@ def create_app() -> FastAPI:
                     "x":             float(coords_3d[i, 0]),
                     "y":             float(coords_3d[i, 1]),
                     "z":             float(coords_3d[i, 2]),
-                    "cluster_id":    faq.get("cluster_id", 0),
-                    "faq_question":  faq.get("faq_question", ""),
-                    "faq_answer":    faq.get("faq_answer", ""),
-                    "support_count": faq.get("support_count", 0),
+                    "cluster_id":    faq.get("cluster_id", faq.get("group_id", 0)),
+                    "faq_question":  faq.get("group_name") or faq.get("faq_question", ""),
+                    "faq_answer":    faq.get("suggested_admin_reply") or faq.get("faq_answer", ""),
+                    "support_count": faq.get("total_questions", faq.get("support_count", 0)),
                 }
                 for i, faq in enumerate(_faqs)
             ]

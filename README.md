@@ -1,116 +1,246 @@
-# FAQ Mining System
+# FAQ Mining System — v3
 
-> AI-powered FAQ extraction from customer support conversations.
-> Uses sentence transformers, HDBSCAN clustering, and FAISS semantic search.
-> Supports Thai and English text.
+> AI-powered FAQ extraction from Thai customer support conversations.  
+> Uses **local LLM (Ollama)** to extract real Q&A pairs — no paid API, no internet required.
 
 ---
 
-## Quick Start (3 Steps)
+## ⚡ Quick Start (Complete Setup)
 
-### 1. Install Dependencies
+### Step 0 — Prerequisites Check
 
-```bash
+Open PowerShell and verify Python is installed:
+
+```powershell
+python --version   # Need 3.9 or higher
+pip --version
+```
+
+If Python is missing → download from https://www.python.org/downloads/
+
+---
+
+### Step 1 — Install Ollama
+
+**Option A (Recommended) — One command:**
+```powershell
+winget install Ollama.Ollama
+```
+
+**Option B — Download installer manually:**  
+Go to: **https://ollama.com/download/OllamaSetup.exe**  
+Run the `.exe` → Click Install → **Close and reopen PowerShell**
+
+**Verify installation:**
+```powershell
+ollama --version
+# Expected output: ollama version 0.x.x
+```
+
+> After installation, Ollama runs as a **background service automatically**.  
+> You do NOT need to run `ollama serve` manually.
+
+---
+
+### Step 2 — Choose and Download a Language Model
+
+Pick the model that fits your RAM:
+
+| Model | Size | RAM Needed | Thai Quality | Recommendation |
+|---|---|---|---|---|
+| `scb10x/llama3.1-typhoon2-8b-instruct` | 5.0 GB | 8 GB+ | ✅ Best Thai | **Best overall — start here** |
+
+**Download your chosen model** (example: typhoon):
+```powershell
+ollama pull scb10x/llama3.1-typhoon2-8b-instruct
+```
+> This takes 5–20 minutes depending on internet speed. Progress bar will appear.
+
+**Verify the model downloaded:**
+```powershell
+ollama list
+# Should show: scb10x/llama3.1-typhoon2-8b-instruct   ... (size) ... (date)
+```
+
+**Quick test — confirm Thai response:**
+```powershell
+ollama run scb10x/llama3.1-typhoon2-8b-instruct "สรุปในหนึ่งประโยค: ลูกค้าถามว่าโอนเงินยังไง"
+```
+Expected: a short Thai response. If you see Thai text → ✅ ready.
+
+---
+
+### Step 3 — Install Python Dependencies
+
+```powershell
+cd C:\Users\User\Desktop\context_extract
 pip install -r requirements.txt
 ```
 
-> **Note:** First run downloads the `all-MiniLM-L6-v2` model (~80 MB, automatic).
+> First run downloads `BAAI/bge-m3` embedding model (~2.2 GB, automatic, cached).
 
-### 2. Start the Server
+---
 
-```bash
-python backend/main.py --serve
+### Step 4 — Configure the Model Name
+
+Tell the system which Ollama model to use.
+
+**Check the exact model name from step 2:**
+```powershell
+ollama list
+```
+The name shown here (e.g. `scb10x/llama3.1-typhoon2-8b-instruct`) is what you set below.
+
+**Option A — Set per session (PowerShell):**
+```powershell
+$env:LLM_MODEL = "scb10x/llama3.1-typhoon2-8b-instruct"
 ```
 
-### 3. Open in Browser
+**Option B — Set permanently in `backend/config.py`:**
+```python
+# Line ~153 in config.py
+TOPIC_NAMER_MODEL = "scb10x/llama3.1-typhoon2-8b-instruct"   # ← change this
+```
+
+---
+
+### Step 5 — Run the Pipeline
+
+```powershell
+# From the project directory:
+python backend/main.py --input data/conversations.json --serve
+```
+
+Watch the console. You'll see stages progress:
+```
+Stage 1: Loading dataset...      → X records
+Stage 2: Cleaning text...
+Stage 3: Filtering questions...
+Stage 3.5: LLM FAQ extraction... → calls Ollama for each batch
+Stage 4: Embeddings (bge-m3)...  → downloads model first time
+Stage 4.5: UMAP reduction...
+...
+Pipeline complete! X groups, Y FAQ pairs
+Starting API at http://0.0.0.0:8000
+```
+
+---
+
+### Step 6 — Open the UI
 
 ```
 http://localhost:8000
 ```
 
-That's it. **No command line needed after this.** Everything is done through the UI.
+---
+
+## 🔄 Subsequent Runs (Already Set Up)
+
+```powershell
+$env:LLM_MODEL = "hf.co/scb10x/typhoon-v1.5-8b-instruct-gguf:Q4_K_M"
+python backend/main.py --input data/conversations.json --serve
+```
+
+Embeddings and UMAP are **cached** — Stage 4 and 4.5 are skipped on repeat runs unless data changes.
 
 ---
 
-## Deployment (Docker)
+## How It Works (Pipeline Overview)
 
-To deploy the application in a production environment, use Docker.
-
-### Option 1: Docker CLI
-
-```bash
-docker build -t faq-miner-ai .
-docker run -d -p 8000:8000 -v faq_data:/app/data --name faq_miner faq-miner-ai
 ```
-
-### Option 2: Docker Compose
-
-```bash
-docker-compose up -d
+Conversations
+  → Stage 1-3:  Load → Clean → Filter valid Q&A pairs
+  → Stage 3.5:  [LLM] Ollama reads batches of 30 conversations
+                and extracts canonical {question, answer} pairs
+  → Stage 4:    Embed FAQ questions (BAAI/bge-m3, 1024-dim)
+  → Stage 4.5:  UMAP reduction (1024 → 8 dims)
+  → Stage 5:    Deduplicate similar FAQs
+  → Stage 6-7:  HDBSCAN clustering + quality filter
+  → Stage 8:    [LLM] Ollama names each group
+  → Stage 9-10: Assemble groups with full FAQ lists
+  → Stage 11:   Build FAISS semantic search index
+  → Output:     groups[{ group_name, faqs:[{question, answer}] }]
 ```
-
-The application will be accessible at `http://localhost:8000`.
 
 ---
 
-## How to Use the UI
+## Output Example
 
-| Step | Tab                             | Action                                                                                               |
-| ---- | ------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| 1    | 📂 **Upload Data**         | Upload Excel/CSV/JSON. A **Data Mapping** UI will appear to select your Question/Answer columns |
-| 2    | ⚙️ **Process & Analyze** | Adjust settings, then click **▶ Start Analysis**                                               |
-| 3    | ❓ **FAQ Library**         | View extracted FAQs, filter by Topic Group                                                           |
-| 4    | 🔍 **Smart Search**        | Type any question — AI finds the best match                                                         |
-| 5    | 🔗 **Topic Groups**        | Browse question clusters found by AI                                                                 |
-| 6    | 📊 **Reports & Charts**    | View statistics, click **Refresh Charts**                                                       |
-| 7    | 🗂️ **Data Management**   | Relabel groups or delete bad FAQs to refine the AI output (Supports Individual and Group Views) |
-| 8    | 📖 **Support**             | Read the embedded User Manual, Terms, and Privacy Policy without leaving the system             |
+```json
+{
+  "total_groups": 5,
+  "groups": [
+    {
+      "group_name": "ปัญหาการเข้าระบบ MT5",
+      "total_faqs": 8,
+      "faqs": [
+        { "question": "MT5 เข้าระบบไม่ได้ทำอย่างไร", "answer": "กรุณารีเซ็ตรหัสผ่าน..." },
+        { "question": "ลืมรหัสผ่าน MT5 ทำยังไง",      "answer": "ติดต่อ Support ที่..." }
+      ]
+    }
+  ]
+}
+```
 
 ---
 
 ## Input File Format
 
-All formats require these two columns:
+Upload any file with customer questions and admin answers. Column names don't matter — the UI has a column mapping step.
 
-| Column Name          | Description                               |
-| -------------------- | ----------------------------------------- |
-| `customer_message` | The customer's question (Thai or English) |
-| `admin_reply`      | The support agent's answer                |
-
-**JSON example:**
-
+**JSON:**
 ```json
 [
-  { "customer_message": "สินค้ายังไม่ได้รับเลย", "admin_reply": "กรุณาติดต่อ 02-xxx-xxxx" },
-  { "customer_message": "How do I track my order?", "admin_reply": "Visit the Track Order page." }
+  { "customer_message": "MT5 เข้าไม่ได้", "admin_reply": "กรุณารีเซ็ตรหัสผ่าน" }
 ]
 ```
 
-**CSV example:**
-
+**CSV:**
 ```csv
 customer_message,admin_reply
-"สินค้ายังไม่ได้รับ","กรุณาติดต่อ 02-xxx-xxxx"
-"How do I return?","Returns accepted within 30 days."
+"MT5 เข้าไม่ได้","กรุณารีเซ็ตรหัสผ่าน"
 ```
 
-> **Thai & English:** Both languages are fully supported. All data is stored as UTF-8.
+**Excel (.xlsx):** Any two columns, map them in the UI.
 
 ---
 
-## Configuration
+## Configuration Reference (`backend/config.py`)
 
-Edit `backend/config.py` to tune the system:
+### LLM Settings
 
-| Setting                        | Default              | Description                                  |
-| ------------------------------ | -------------------- | -------------------------------------------- |
-| `DEDUP_SIMILARITY_THRESHOLD` | `0.92`             | Strictness of duplicate removal (0.70–0.99) |
-| `CLUSTER_MIN_CLUSTER_SIZE`   | `3`                | Minimum questions per topic group            |
-| `CLUSTER_MIN_SIZE_THRESHOLD` | `2`                | Discard groups smaller than this             |
-| `EMBEDDING_MODEL_NAME`       | `all-MiniLM-L6-v2` | AI embedding model                           |
-| `FAISS_TOP_K_DEFAULT`        | `5`                | Default search results count                 |
+| Setting | Default | Description |
+|---|---|---|
+| `TOPIC_NAMER_PROVIDER` | `"ollama"` | Change to `"mock"` to skip LLM (for testing only) |
+| `TOPIC_NAMER_MODEL` | `"scb10x/typhoon..."` | **Change to match your `ollama list` output** |
+| `TOPIC_NAMER_OLLAMA_URL` | `"http://localhost:11434/api/generate"` | Default Ollama endpoint |
 
-> **Tip for small datasets:** Lower `CLUSTER_MIN_CLUSTER_SIZE` to `2` to generate more FAQs.
+### FAQ Extraction
+
+| Setting | Default | Description |
+|---|---|---|
+| `FAQ_EXTRACTION_BATCH_SIZE` | `30` | Conversations per LLM call |
+| `FAQ_PER_BATCH` | `8` | Max FAQ pairs extracted per batch |
+| `FAQ_DEDUP_SIMILARITY_THRESHOLD` | `0.90` | Lower = keep more FAQ variants |
+
+### Clustering
+
+| Setting | Default | Description |
+|---|---|---|
+| `CLUSTER_MIN_CLUSTER_SIZE` | `3` | Min FAQs per group (lower for small datasets) |
+
+---
+
+## Troubleshooting
+
+| Problem | Cause | Fix |
+|---|---|---|
+| `ollama: not recognized` | Ollama not installed or PowerShell not restarted | Close & reopen PowerShell after install |
+| `"No FAQ pairs extracted"` | Ollama not running / model not pulled | Run `ollama list` to confirm model exists |
+| Ollama running but no response | Model name wrong in config | Run `ollama list`, copy exact name to `LLM_MODEL` |
+| Pipeline very slow | LLM calls take time | Normal — Stage 3.5 calls Ollama per batch; increase `FAQ_EXTRACTION_BATCH_SIZE` |
+| Too few groups | Dataset too small or `CLUSTER_MIN_CLUSTER_SIZE` too high | Lower `CLUSTER_MIN_CLUSTER_SIZE` to 2 |
+| bge-m3 download slow | First run only | 2.2 GB download, cached after first run |
 
 ---
 
@@ -119,72 +249,80 @@ Edit `backend/config.py` to tune the system:
 ```
 context_extract/
 ├── backend/
-│   ├── config.py            ← All settings (edit this)
-│   ├── main.py              ← Pipeline orchestrator (CLI mode)
-│   ├── api.py               ← FastAPI: REST API + frontend serving
-│   ├── data_loader.py       ← Step 1: Load JSON / CSV / Excel
-│   ├── text_cleaner.py      ← Step 2: Clean text
-│   ├── question_filter.py   ← Step 3: Filter valid questions
-│   ├── embedding_service.py ← Step 4: AI sentence embeddings
-│   ├── deduplication.py     ← Step 5: Remove duplicates
-│   ├── clustering.py        ← Step 6+7: HDBSCAN grouping
-│   ├── faq_generator.py     ← Step 8-10: Generate FAQ answers
-│   ├── search_index.py      ← Step 11: FAISS search index
-│   └── analytics.py         ← Step 13: Reports
+│   ├── config.py              ← All settings (edit this)
+│   ├── main.py                ← Pipeline orchestrator
+│   ├── api.py                 ← FastAPI REST + frontend
+│   ├── data_loader.py         ← Stage 1: Load files
+│   ├── text_cleaner.py        ← Stage 2: Clean text
+│   ├── question_filter.py     ← Stage 3: Filter Q&A
+│   ├── llm_extractor.py       ← Stage 3.5: LLM batch extraction [NEW]
+│   ├── embedding_service.py   ← Stage 4: bge-m3 (1024-dim)
+│   ├── umap_reducer.py        ← Stage 4.5: UMAP reduction [NEW]
+│   ├── deduplication.py       ← Stage 5: Dedup
+│   ├── clustering.py          ← Stage 6-7: HDBSCAN
+│   ├── topic_namer.py         ← Stage 8: LLM group naming [NEW]
+│   ├── faq_generator.py       ← Stage 9-10: Assemble output
+│   ├── search_index.py        ← Stage 11: FAISS
+│   └── analytics.py           ← Stage 13: Reports
 ├── frontend/
-│   ├── index.html           ← Single-page UI (7 tabs)
-│   └── app.js               ← All UI logic
+│   ├── index.html             ← Single-page app UI
+│   ├── manual.html            ← User manual (this guide in Thai)
+│   └── app.js                 ← UI logic
 ├── data/
-│   ├── conversations.json   ← Sample dataset
-│   ├── uploads/             ← Uploaded files
-│   ├── faqs.json            ← Extracted FAQs (auto-generated)
-│   └── analytics_report.json
-└── requirements.txt
+│   ├── conversations.json     ← Sample dataset
+│   ├── uploads/               ← Uploaded files
+│   └── faqs.json              ← Output (auto-generated)
+├── requirements.txt
+├── Dockerfile
+└── docker-compose.yml
 ```
 
 ---
 
 ## API Reference
 
-Base URL: `http://localhost:8000`
+Base URL: `http://localhost:8000` | Swagger: `/docs`
 
-| Method | Endpoint                | Description                            |
-| ------ | ----------------------- | -------------------------------------- |
-| GET    | `/health`             | Server status check                    |
-| GET    | `/manual`             | Serves the User Manual HTML            |
-| POST   | `/upload`             | Upload file (multipart/form-data)      |
-| POST   | `/preview-data`       | Read uploaded headers and rows         |
-| POST   | `/apply-mapping`      | Rename columns and save for processing |
-| POST   | `/run-pipeline`       | Start AI analysis in background        |
-| GET    | `/pipeline-status`    | Poll analysis progress                 |
-| GET    | `/faqs`               | Get all FAQs                           |
-| POST   | `/search`             | Semantic FAQ search                    |
-| GET    | `/clusters`           | Get topic groups                       |
-| GET    | `/analytics`          | Get full report                        |
-| GET    | `/visualization-data` | Get 3D cluster points                  |
-| POST   | `/faqs/relabel`       | Manually change the FAQ's topic group  |
-| POST   | `/faqs/delete`        | Delete FAQs by index                   |
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/groups` | **Primary** — all FAQ groups with Q&A lists |
+| GET | `/faqs` | Legacy alias for `/groups` |
+| POST | `/search` | Semantic search: `{"query": "..."}` |
+| GET | `/analytics` | Statistics report |
+| GET | `/pipeline-status` | Poll pipeline progress |
+| POST | `/upload` | Upload data file |
+| POST | `/run-pipeline` | Trigger analysis |
+| POST | `/faqs/relabel` | Move FAQ to different group |
+| POST | `/faqs/delete` | Delete FAQ |
+| GET | `/manual` | This user manual |
 
 ---
 
-## Performance
+## Use Without UI (CLI)
 
-| Dataset Size    | Pipeline Time | Search Latency |
-| --------------- | ------------- | -------------- |
-| 1,000 records   | ~15 seconds   | < 10 ms        |
-| 10,000 records  | ~90 seconds   | < 50 ms        |
-| 100,000 records | ~15 minutes   | < 200 ms       |
+```powershell
+# Run pipeline + start server
+$env:LLM_MODEL = "hf.co/scb10x/typhoon-v1.5-8b-instruct-gguf:Q4_K_M"
+python backend/main.py --input data/conversations.json --serve
 
-> Embeddings are cached to `data/embeddings_cache.npy` — re-runs skip Step 4 automatically.
-
----
-
-## CLI (for developers)
-
-```bash
-# Run pipeline + start server in one command
-python backend/main.py --serve
-
-# Run pipeline only (generates data files, no server)
+# Pipeline only (no server)
 python backend/main.py --input data/conversations.json
+
+# Test mode — no Ollama needed (mock LLM)
+$env:LLM_PROVIDER = "mock"
+python backend/main.py --input data/conversations.json --serve
 ```
+
+---
+
+## Docker Deployment
+
+```powershell
+docker build -t faq-miner-ai .
+docker run -d -p 8000:8000 -v faq_data:/app/data `
+  -e LLM_MODEL=scb10x/llama3.1-typhoon2-8b-instruct `
+  -e OLLAMA_URL=http://host.docker.internal:11434/api/generate `
+  --name faq_miner faq-miner-ai
+```
+
+> Ollama must run on the **host machine**. Use `host.docker.internal` instead of `localhost`.

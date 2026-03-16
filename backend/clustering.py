@@ -1,7 +1,8 @@
 """
 clustering.py — Stages 6 & 7: Semantic Clustering + Quality Filtering
-Uses HDBSCAN on L2-normalised embeddings (euclidean ≡ cosine on unit vectors).
-Filters out small/noisy clusters that don't represent meaningful FAQ topics.
+
+Runs HDBSCAN on UMAP-reduced embeddings (NOT on raw high-dimensional vectors).
+UMAP output is in euclidean space — no L2-normalisation is applied here.
 """
 
 import logging
@@ -25,7 +26,6 @@ from backend.config import (
     LOG_DATE_FORMAT,
     LOG_LEVEL,
 )
-from backend.embedding_service import l2_normalize
 
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
 logger = logging.getLogger(__name__)
@@ -33,51 +33,49 @@ logger = logging.getLogger(__name__)
 
 def _compute_intra_cluster_distance(cluster_embs: np.ndarray) -> float:
     """
-    Compute average pairwise Euclidean distance within a cluster.
-    Lower = more coherent cluster.
+    Compute average pairwise Euclidean distance within a cluster
+    in the UMAP-reduced space. Lower = more coherent cluster.
     """
     n = len(cluster_embs)
     if n <= 1:
         return 0.0
-    # Pairwise squared distances via broadcast
     diff = cluster_embs[:, np.newaxis, :] - cluster_embs[np.newaxis, :, :]
     sq_dist = (diff ** 2).sum(axis=2)
-    # Upper triangular → average
     upper = sq_dist[np.triu_indices(n, k=1)]
     return float(np.sqrt(upper).mean())
 
 
 def run_clustering(
     df: pd.DataFrame,
-    embeddings: np.ndarray,
+    reduced_embeddings: np.ndarray,
     min_cluster_size: int = CLUSTER_MIN_CLUSTER_SIZE,
     min_samples: int = CLUSTER_MIN_SAMPLES,
     metric: str = CLUSTER_METRIC,
     selection_method: str = CLUSTER_SELECTION_METHOD,
 ) -> pd.DataFrame:
     """
-    Stage 6: Run HDBSCAN clustering.
+    Stage 6: Run HDBSCAN clustering on UMAP-reduced embeddings.
 
     Args:
-        df: DataFrame with at least FIELD_CLEAN_QUESTION.
-        embeddings: Raw float32 embeddings (N, D).
-        min_cluster_size: HDBSCAN minimum cluster size.
-        min_samples: HDBSCAN min_samples param.
-        metric: Distance metric.
-        selection_method: HDBSCAN cluster selection method.
+        df:                 DataFrame with at least FIELD_CLEAN_QUESTION.
+        reduced_embeddings: UMAP-reduced float32 array of shape (N, n_components).
+                            DO NOT pass raw high-dimensional embeddings here.
+        min_cluster_size:   HDBSCAN minimum cluster size (tune per dataset).
+        min_samples:        HDBSCAN min_samples; lower = more points absorbed.
+        metric:             Distance metric (euclidean for UMAP output).
+        selection_method:   "eom" or "leaf".
 
     Returns:
-        df with FIELD_CLUSTER_ID column added (-1 = noise).
+        df with FIELD_CLUSTER_ID column added (-1 = noise/unclustered).
     """
     try:
         import hdbscan
     except ImportError:
         raise ImportError("hdbscan is required: pip install hdbscan")
 
-    norm_embs = l2_normalize(embeddings)
-
     logger.info(
-        f"Stage 6: Running HDBSCAN on {len(norm_embs)} points "
+        f"Stage 6: Running HDBSCAN on {len(reduced_embeddings)} points "
+        f"in {reduced_embeddings.shape[1]}-dim UMAP space "
         f"(min_cluster_size={min_cluster_size}, min_samples={min_samples}) …"
     )
 
@@ -88,7 +86,7 @@ def run_clustering(
         cluster_selection_method=selection_method,
         core_dist_n_jobs=-1,  # use all CPU cores
     )
-    labels = clusterer.fit_predict(norm_embs)
+    labels = clusterer.fit_predict(reduced_embeddings)
 
     df = df.copy()
     df[FIELD_CLUSTER_ID] = labels
@@ -104,36 +102,34 @@ def run_clustering(
 
 def filter_clusters(
     df: pd.DataFrame,
-    embeddings: np.ndarray,
+    reduced_embeddings: np.ndarray,
     min_size: int = CLUSTER_MIN_SIZE_THRESHOLD,
     max_intra_distance: float = CLUSTER_MAX_INTRA_DISTANCE,
 ) -> pd.DataFrame:
     """
-    Stage 7: Quality-filter clusters.
+    Stage 7: Quality-filter clusters in UMAP-reduced space.
 
     Rules:
       1. Clusters with fewer than min_size members → discarded (set to noise=-1).
-      2. Clusters whose average intra-cluster Euclidean distance > max_intra_distance
-         → considered too diverse → discarded.
+      2. Clusters whose average intra-cluster Euclidean distance in UMAP space
+         > max_intra_distance → considered too diverse → discarded.
 
     Args:
-        df: DataFrame with FIELD_CLUSTER_ID.
-        embeddings: Corresponding embeddings (same order as df).
-        min_size: Minimum cluster size to keep.
+        df:                 DataFrame with FIELD_CLUSTER_ID.
+        reduced_embeddings: UMAP-reduced embeddings (same order as df).
+        min_size:           Minimum cluster size to keep.
         max_intra_distance: Maximum average pairwise distance to keep.
 
     Returns:
         df with updated FIELD_CLUSTER_ID (discarded → -1).
     """
-    norm_embs = l2_normalize(embeddings)
     df = df.copy()
-
     unique_clusters = [c for c in df[FIELD_CLUSTER_ID].unique() if c != -1]
     discarded = []
 
     for cluster_id in unique_clusters:
         mask = df[FIELD_CLUSTER_ID] == cluster_id
-        cluster_embs = norm_embs[mask.values]
+        cluster_embs = reduced_embeddings[mask.values]
 
         # Rule 1: size check
         if cluster_embs.shape[0] < min_size:
@@ -141,11 +137,11 @@ def filter_clusters(
             discarded.append((cluster_id, "too_small", cluster_embs.shape[0]))
             continue
 
-        # Rule 2: diversity check
+        # Rule 2: diversity check (in UMAP space, distances are already compact)
         avg_dist = _compute_intra_cluster_distance(cluster_embs)
         if avg_dist > max_intra_distance:
             df.loc[mask, FIELD_CLUSTER_ID] = -1
-            discarded.append((cluster_id, "too_diverse", avg_dist))
+            discarded.append((cluster_id, "too_diverse", round(avg_dist, 3)))
 
     valid_clusters = len([c for c in df[FIELD_CLUSTER_ID].unique() if c != -1])
     logger.info(

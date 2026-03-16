@@ -1,36 +1,63 @@
-import urllib.request, json, time
-base = 'http://localhost:8000'
+"""
+test_api.py — Smoke test for the v2 FAQ Mining API.
+Requires the server to be running (python backend/main.py --serve).
+"""
+import json
+import time
+import urllib.request
 
-# Test /faqs
-r = urllib.request.urlopen(base + '/faqs')
-faqs = json.loads(r.read())
-print('/faqs:', faqs['total'], 'FAQs')
-print('  Top:', faqs['faqs'][0]['faq_question'], '(support={})'.format(faqs['faqs'][0]['support_count']))
+base = "http://localhost:8000"
 
-# Test /search  
-req = urllib.request.Request(
-    base + '/search',
-    data=json.dumps({'query': 'track my order', 'top_k': 3}).encode(),
-    headers={'Content-Type': 'application/json'}
-)
+
+def _get(path):
+    r = urllib.request.urlopen(base + path)
+    return json.loads(r.read())
+
+
+def _post(path, body):
+    req = urllib.request.Request(
+        base + path,
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    r = urllib.request.urlopen(req)
+    return json.loads(r.read())
+
+
+# ── /groups (primary new endpoint) ──────────────────────────────────────────
+data = _get("/groups")
+print(f"/groups: total_groups={data['total_groups']}")
+if data["total_groups"] > 0:
+    g = data["groups"][0]
+    print(f"  group_id   : {g['group_id']}")
+    print(f"  group_name : {g['group_name']}")
+    print(f"  total_q    : {g['total_questions']}")
+    print(f"  rep_qs     : {g['representative_questions'][:2]}")
+    print(f"  admin_reply: {g['suggested_admin_reply'][:80]}")
+
+# ── /faqs (backwards compat) ─────────────────────────────────────────────────
+faqs = _get("/faqs")
+print(f"\n/faqs (compat): total={faqs['total']}")
+
+# ── /search  ─────────────────────────────────────────────────────────────────
 t0 = time.time()
-r = urllib.request.urlopen(req)
+res = _post("/search", {"query": "เข้าระบบไม่ได้", "top_k": 3})
 ms = (time.time() - t0) * 1000
-data = json.loads(r.read())
-print('/search: {} results in {:.1f}ms'.format(data['count'], ms))
-print('  Top result:', data['results'][0]['faq_question'])
-print('  Score:', data['results'][0]['similarity_score'])
+print(f"\n/search ({ms:.1f}ms): {res['count']} results")
+if res["results"]:
+    top = res["results"][0]
+    print(f"  top group_name : {top.get('group_name', top.get('faq_question', '?'))}")
+    print(f"  similarity     : {top['similarity_score']}")
 
-# Test /clusters
-r = urllib.request.urlopen(base + '/clusters')
-cl = json.loads(r.read())
-print('/clusters:', cl['total_clusters'], 'clusters')
+# ── /clusters ────────────────────────────────────────────────────────────────
+cl = _get("/clusters")
+print(f"\n/clusters: total_clusters={cl['total_clusters']}")
 
-# Test /analytics
-r = urllib.request.urlopen(base + '/analytics')
-an = json.loads(r.read())
-s = an['summary']
-print('/analytics: total={}, faqs={}, noise={}%'.format(
-    s['total_conversations'], s['total_faqs_generated'], s['noise_ratio_percent']))
+# ── /analytics ───────────────────────────────────────────────────────────────
+an = _get("/analytics")
+s = an.get("summary", an)
+print(f"\n/analytics: total={s.get('total_conversations', '?')}, "
+      f"faqs={s.get('total_faqs_generated', '?')}, "
+      f"noise={s.get('noise_ratio_percent', '?')}%")
 
-print('\nALL ENDPOINTS OK')
+print("\nALL ENDPOINTS OK ✓")
