@@ -96,13 +96,8 @@ async function checkHealth() {
     const res = await fetch(base ? `${base}/health` : '/health');
     const d = await res.json();
     if (!res.ok) throw new Error(d.detail || res.status);
-    document.getElementById('apiDot').className = 'dot online';
-    const n = d.faq_count != null ? d.faq_count : 0;
-    document.getElementById('apiStatus').textContent = n ? `Online · ${n} groups` : 'Online · Ready';
     state.apiReady = true;
   } catch {
-    document.getElementById('apiDot').className = 'dot';
-    document.getElementById('apiStatus').textContent = 'Offline';
     state.apiReady = false;
   }
 }
@@ -112,30 +107,44 @@ async function loadAll() {
   await checkHealth();
   if (!state.apiReady) {
     showToast('API offline. Start the server first.', 'error');
+    refreshAllViews();
     return;
   }
   showLoading('Loading…');
   try {
-    const [faqData, clusterData, analyticsData] = await Promise.all([
+    const [faqData, clusterData, analyticsData] = await Promise.allSettled([
       apiFetch('/faqs?limit=1000'),
       apiFetch('/clusters'),
       apiFetch('/analytics'),
     ]);
-    state.faqs = faqData.faqs || [];
-    state.clusters = clusterData.clusters || [];
-    state.analytics = analyticsData || null;
-    updateStats();
-    renderFAQs();
-    renderClusters();
-    renderAnalytics();
-    populateClusterFilter();
-    populateHintChips();
-    renderDMTable();
+
+    if (faqData.status === 'fulfilled') {
+      state.faqs = (faqData.value.faqs || faqData.value.groups || []);
+    } else {
+      console.error('Failed to load FAQs:', faqData.reason);
+    }
+
+    if (clusterData.status === 'fulfilled') {
+      state.clusters = (clusterData.value.clusters || []);
+    } else {
+      console.error('Failed to load clusters:', clusterData.reason);
+    }
+
+    if (analyticsData.status === 'fulfilled') {
+      state.analytics = analyticsData.value || null;
+    } else {
+      console.error('Failed to load analytics:', analyticsData.reason);
+    }
+
     const totalItems = state.faqs.reduce((a, g) => a + (g.total_faqs || (g.faqs || []).length), 0);
     showToast(totalItems ? `Loaded ${totalItems} FAQs in ${state.faqs.length} groups` : 'Ready. Upload a file and run analysis.', 'success');
   } catch (err) {
-    showToast('Failed to load data.', 'error');
-  } finally { hideLoading(); }
+    console.error('loadAll error:', err);
+    showToast('Failed to load data: ' + err.message, 'error');
+  } finally {
+    refreshAllViews();
+    hideLoading();
+  }
 }
 
 // ── Stats ─────────────────────────────────────────────────────────────────────
@@ -155,6 +164,18 @@ function updateStats() {
     if (el('stat-conversations')) el('stat-conversations').textContent = '—';
     if (el('stat-noise')) el('stat-noise').textContent = '—';
   }
+}
+
+// ── Centralized View Refresh ──────────────────────────────────────────────────
+function refreshAllViews() {
+  try { updateStats(); } catch(e) { console.error('updateStats error:', e); }
+  try { renderFAQs(); } catch(e) { console.error('renderFAQs error:', e); }
+  try { populateClusterFilter(); } catch(e) { console.error('populateClusterFilter error:', e); }
+  try { renderClusters(); } catch(e) { console.error('renderClusters error:', e); }
+  try { renderAnalytics(); } catch(e) { console.error('renderAnalytics error:', e); }
+  try { renderDMTable(); } catch(e) { console.error('renderDMTable error:', e); }
+  try { resetSearchUI(); } catch(e) { console.error('resetSearchUI error:', e); }
+  try { populateHintChips(); } catch(e) { console.error('populateHintChips error:', e); }
 }
 
 // ── FAQ Library ───────────────────────────────────────────────────────────────
@@ -235,51 +256,77 @@ function renderClusters() {}
 // ── Reports & Charts ──────────────────────────────────────────────────────────
 async function renderAnalytics() {
   const grid = document.getElementById('analyticsGrid');
-  if (!state.analytics) {
+  if (!grid) return;
+
+  const hasAnalytics = state.analytics && state.analytics.summary && Object.keys(state.analytics.summary).length > 0;
+
+  if (!hasAnalytics && !state.faqs.length) {
     grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1"><div class="empty-icon">📊</div>
       <p>No analytics yet — run analysis first</p></div>`;
     return;
   }
-  
-  const s = state.analytics.summary;
-  const pass = s.questions_passed_into_groups ?? s.total_clustered_questions ?? 0;
-  const fail = s.questions_discarded ?? ((s.total_valid_questions ?? 0) - (s.total_clustered_questions ?? 0));
-  const total = Math.max(pass + fail, 1);
 
-  // 1. Top Row: Pie chart — Pass Filter vs Not Pass (filtered out / duplicate removed)
-  const topRow = document.getElementById('analyticsTopRow');
-  topRow.innerHTML = `
-    <div class="analytics-card" style="height: 300px; display: flex; flex-direction: column;">
-      <h3>Pass Filter vs Not Pass</h3>
-      <div class="pie-container" style="flex:1; justify-content: center;">
-        ${buildDonut([
-          {label: 'Pass Filter (into FAQ)', value: pass, color: '#10b981'},
-          {label: 'Not Pass (filtered out)', value: fail, color: '#ef4444'}
-        ], total)}
+  // Rebuild the full grid structure so child elements always exist
+  grid.innerHTML = `
+    <div id="analyticsTopRow" style="display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 20px;"></div>
+    <div id="analyticsBottomRow" style="display: grid; grid-template-columns: 1fr 1.2fr; gap: 18px;">
+      <div class="analytics-card" style="display: flex; flex-direction: column; overflow: hidden;">
+        <h3>Question &amp; Answer</h3>
+        <div style="flex: 1; overflow-y: auto; max-height: 400px; border: 1px solid var(--border); border-radius: 8px;">
+          <table class="dm-table" id="analyticsRawTable" style="margin: 0; font-size: 11px;">
+            <thead style="position: sticky; top: 0; z-index: 1;"></thead>
+            <tbody id="analyticsRawBody"></tbody>
+          </table>
+        </div>
       </div>
-    </div>
-    <div class="analytics-card" style="height: 300px;">
-      <h3>Pipeline Efficiency</h3>
-      <div class="summary-grid" style="margin-top: 10px;">
-        ${[
-          ['Total Input', (s.total_conversations || 0).toLocaleString()],
-          ['Valid Questions', (s.total_valid_questions || 0).toLocaleString()],
-          ['After Dedup', (s.total_after_deduplication || 0).toLocaleString()],
-          ['Duplicates Removed', (s.total_duplicates_removed || 0).toLocaleString()],
-          ['Groups Created', (s.total_faqs_generated || 0).toLocaleString()],
-          ['Avg Group Size', s.average_cluster_size ?? '—'],
-          ['Clustered Qs', (s.total_clustered_questions || 0).toLocaleString()],
-          ['Noise (Unclustered)', (s.total_noise_questions || 0).toLocaleString()],
-        ].map(([l, v]) => `<div class="summary-item"><span class="summary-lbl">${l}</span><span class="summary-val">${v}</span></div>`).join('')}
+      <div class="analytics-card" style="display: flex; flex-direction: column; overflow: hidden;">
+        <h3>FAQ - Mining</h3>
+        <div id="analyticsGroupsList" style="flex: 1; overflow-y: auto; max-height: 500px; padding-right: 4px;"></div>
       </div>
     </div>
   `;
 
-  // 2. Bottom Left: Raw Table
+  if (hasAnalytics) {
+    const s = state.analytics.summary;
+    const pass = s.questions_passed_into_groups ?? s.total_clustered_questions ?? 0;
+    const fail = s.questions_discarded ?? ((s.total_valid_questions ?? 0) - (s.total_clustered_questions ?? 0));
+    const total = Math.max(pass + fail, 1);
+
+    const topRow = document.getElementById('analyticsTopRow');
+    topRow.innerHTML = `
+      <div class="analytics-card" style="height: 300px; display: flex; flex-direction: column;">
+        <h3>Pass Filter vs Not Pass</h3>
+        <div class="pie-container" style="flex:1; justify-content: center;">
+          ${buildDonut([
+            {label: 'Pass Filter (into FAQ)', value: pass, color: '#10b981'},
+            {label: 'Not Pass (filtered out)', value: fail, color: '#ef4444'}
+          ], total)}
+        </div>
+      </div>
+      <div class="analytics-card" style="height: 300px;">
+        <h3>Pipeline Efficiency</h3>
+        <div class="summary-grid" style="margin-top: 10px;">
+          ${[
+            ['Total Input', (s.total_conversations || 0).toLocaleString()],
+            ['Valid Questions', (s.total_valid_questions || 0).toLocaleString()],
+            ['After Dedup', (s.total_after_deduplication || 0).toLocaleString()],
+            ['Duplicates Removed', (s.total_duplicates_removed || 0).toLocaleString()],
+            ['Groups Created', (s.total_faqs_generated || 0).toLocaleString()],
+            ['Avg Group Size', s.average_cluster_size ?? '—'],
+            ['Clustered Qs', (s.total_clustered_questions || 0).toLocaleString()],
+            ['Noise (Unclustered)', (s.total_noise_questions || 0).toLocaleString()],
+          ].map(([l, v]) => `<div class="summary-item"><span class="summary-lbl">${l}</span><span class="summary-val">${v}</span></div>`).join('')}
+        </div>
+      </div>
+    `;
+  }
+
+  // Bottom Left: Raw Table
   renderAnalyticsRawTable();
 
-  // 3. Bottom Right: FAQ - Mining (same card style as FAQ Library)
+  // Bottom Right: FAQ - Mining
   const groupsList = document.getElementById('analyticsGroupsList');
+  if (!groupsList) return;
   if (!state.faqs.length) {
     groupsList.innerHTML = '<div class="empty-state" style="padding:20px 0"><p>No groups available. Run analysis first.</p></div>';
   } else {
@@ -328,7 +375,7 @@ async function renderAnalytics() {
 async function renderAnalyticsRawTable() {
   const thead = document.querySelector('#analyticsRawTable thead');
   const tbody = document.getElementById('analyticsRawBody');
-  if (!tbody) return;
+  if (!tbody || !thead) return;
   if (thead) thead.innerHTML = `<tr><th style="width:45%">Question</th><th>Answer</th></tr>`;
   try {
     let conversationData = [];
@@ -443,7 +490,6 @@ function renderDMTable() {
     body.innerHTML = '';
     empty.style.display = 'block';
     if (label) label.textContent = '';
-    populateRelabelDropdown();
     updateDeleteBtn();
     return;
   }
@@ -550,15 +596,8 @@ async function deleteSelected() {
       }
     }
 
-    // ── 4. Re-render EVERY page that displays FAQ data ────────────────
-    updateStats();               
-    renderFAQs();                
-    populateClusterFilter();     
-    renderClusters();            
-    renderAnalytics();           
-    renderDMTable();             
-    resetSearchUI();             
-    populateHintChips();         
+    // Re-render all pages
+    refreshAllViews();
 
     showToast(
       remainingFAQs.length === 0
@@ -607,15 +646,8 @@ async function relabelSelected(newClusterId) {
       state.clusters  = state.analytics.cluster_sizes || [];
     } catch(e) { console.warn("Could not refresh analytics after relabel", e); }
 
-    // 3. Re-render EVERY page that displays FAQ data
-    updateStats();
-    renderFAQs();
-    populateClusterFilter();
-    renderClusters();
-    renderAnalytics();
-    renderDMTable();
-    resetSearchUI();
-    populateHintChips();
+    // Re-render all pages
+    refreshAllViews();
 
     showToast(`✅ Successfully moved ${res.relabeled} FAQ(s) to Group ${res.new_cluster_id}.`, 'success');
   } catch(err) {
@@ -905,9 +937,7 @@ async function pollStatus() {
       resetRunBtn();
     }
     if(d.status==='running'){
-      document.getElementById('apiDot').className = 'dot running';
       const total = d.total_stages || 7;
-      document.getElementById('apiStatus').textContent = `Analyzing… Step ${d.stage}/${total}`;
     }
   } catch{}
 }
@@ -946,7 +976,11 @@ function populateHintChips() {
   const el = document.getElementById('hintChips');
   if(!el) return;
   el.innerHTML = state.faqs.slice(0,6)
-    .map(f=>`<span class="hint-chip" onclick="fillSearch('${escHtml(f.faq_question.substring(0,50)).replace(/'/g,"&#39;")}')">${escHtml(f.faq_question.substring(0,50))}</span>`)
+    .filter(f => f.faq_question || f.group_name)
+    .map(f => {
+      const label = (f.faq_question || f.group_name || '').substring(0,50);
+      return `<span class="hint-chip" onclick="fillSearch('${escHtml(label).replace(/'/g,"&#39;")}')">${escHtml(label)}</span>`;
+    })
     .join('');
 }
 
@@ -1157,6 +1191,7 @@ async function saveRawData() {
           body: JSON.stringify({ data: state.manipulateData })
       });
       showToast('Data saved successfully. You can now run the analysis.', 'success');
+      renderAnalytics();
   } catch(err) {
       showToast(`Error saving data: ${err.message}`, 'error');
   } finally {
@@ -1170,9 +1205,13 @@ async function saveRawData() {
   initUpload();
   initStageList();
   initSearch();
+  refreshAllViews();
   await checkHealth();
-  if(state.apiReady) {
-    try { await loadAll(); } catch {}
+  try {
+    await loadAll();
+  } catch (err) {
+    console.error('Init loadAll error:', err);
+    refreshAllViews();
   }
 })();
 
@@ -1213,17 +1252,21 @@ window.saveFAQEdit = async function() {
       body: JSON.stringify({ index: editingFaqIndex, question: q, answer: a })
     });
     
-    // Update local state
-    state.faqs[editingFaqIndex].canonical_question = q;
-    state.faqs[editingFaqIndex].faq_question = q;
-    state.faqs[editingFaqIndex].canonical_answer = a;
-    state.faqs[editingFaqIndex].faq_answer = a;
-    state.faqs[editingFaqIndex].suggested_admin_reply = a;
-    
-    // Refresh UI
-    renderFAQs();
-    if(document.getElementById('page-manage').classList.contains('active')) renderDMTable();
-    
+    // Update local state — group-level fields
+    const grp = state.faqs[editingFaqIndex];
+    grp.canonical_question = q;
+    grp.faq_question = q;
+    grp.canonical_answer = a;
+    grp.faq_answer = a;
+    grp.suggested_admin_reply = a;
+
+    // Also update the first inner FAQ if present, so FAQ Library cards reflect the edit
+    if (grp.faqs && grp.faqs.length > 0) {
+      grp.faqs[0].question = q;
+      grp.faqs[0].answer = a;
+    }
+
+    refreshAllViews();
     showToast('FAQ updated successfully', 'success');
     closeEditModal();
   } catch(err) {
@@ -1284,11 +1327,7 @@ window.saveMergeGroups = async function() {
         state.analytics.cluster_sizes = state.analytics.cluster_sizes.filter(c => c.cluster_id !== mergeSourceId);
       }
     }
-    updateStats();
-    renderFAQs();
-    populateClusterFilter();
-    renderAnalytics();
-    renderDMTable();
+    refreshAllViews();
     showToast(`Merged ${res.merged_count} FAQs into the target group.`, 'success');
     closeMergeModal();
   } catch (err) {

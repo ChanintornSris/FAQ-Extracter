@@ -369,12 +369,6 @@
         <span class="n-icon">🔒</span> Privacy Policy
       </div>
     </nav>
-    <div class="sidebar-footer">
-      <div class="status-pill">
-        <div class="dot" id="apiDot"></div>
-        <span id="apiStatus">Connecting…</span>
-      </div>
-    </div>
   </aside>
 
   <div class="main">
@@ -390,9 +384,6 @@
 
       <!-- Upload Page -->
       <div class="page" id="page-upload">
-        <div class="section-header">
-          <div><h2>Upload Data File</h2><p>Accepted formats: Excel (.xlsx), CSV (.csv), JSON (.json)</p></div>
-        </div>
         <div class="upload-wrapper">
           <div class="drop-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
             <input type="file" id="fileInput" accept=".xlsx,.xls,.csv,.json" />
@@ -483,15 +474,14 @@ admin_reply</pre>
 
       <!-- Data Manipulation Page -->
       <div class="page" id="page-manipulate">
-        <div class="section-header">
-          <div><h2>Data Manipulation</h2><p>Edit your uploaded raw data directly before analysis</p></div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+          <div style="display:flex;align-items:center;gap:12px;">
+            <span style="font-size:13px;color:var(--text-secondary);" id="manipulateCount"></span>
+          </div>
           <div style="display:flex;gap:10px;">
             <button class="btn btn-ghost" onclick="addManipulateRow()" style="font-size:12px;">➕ Add Row</button>
             <button class="btn btn-primary" id="saveManipulateBtn" onclick="saveRawData()">💾 Save Changes</button>
           </div>
-        </div>
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
-          <span style="font-size:13px;color:var(--text-secondary);" id="manipulateCount"></span>
         </div>
         <div class="panel-card" style="padding:0; overflow:hidden;" id="manipulateContainer">
           <div style="padding:20px; text-align:center; color:var(--text-muted);" id="manipulateEmpty">
@@ -508,9 +498,6 @@ admin_reply</pre>
 
       <!-- Pipeline Page -->
       <div class="page" id="page-pipeline">
-        <div class="section-header">
-          <div><h2>Process &amp; Analyze</h2><p>Configure settings and run the AI extraction pipeline</p></div>
-        </div>
         <div class="pipeline-grid">
           <div style="display:flex;flex-direction:column;min-height:520px;">
             <div class="panel-card" style="flex:1;display:flex;flex-direction:column;min-height:0;">
@@ -558,9 +545,6 @@ admin_reply</pre>
 
       <!-- FAQ Library Page -->
       <div class="page active" id="page-faqs">
-        <div class="section-header">
-          <div><h2>FAQ Library</h2><p>Click any card to expand the answer</p></div>
-        </div>
         <div class="faq-controls">
           <select class="faq-filter-select" id="clusterFilter" onchange="filterFAQs()">
             <option value="">All groups</option>
@@ -572,9 +556,6 @@ admin_reply</pre>
 
       <!-- Smart Search Page -->
       <div class="page" id="page-search">
-        <div class="section-header">
-          <div><h2>Smart Search</h2><p>Find answers using natural language — AI matches by meaning, not just keywords</p></div>
-        </div>
         <div class="search-box-wrap">
           <span class="search-icon">🔍</span>
           <input type="text" id="searchInput" placeholder="Type your question here…" autocomplete="off" spellcheck="false" />
@@ -609,11 +590,7 @@ admin_reply</pre>
 
       <!-- Reports & Charts Page -->
       <div class="page" id="page-analytics">
-        <div class="analytics-header">
-          <div>
-            <h2>Reports &amp; Charts</h2>
-            <p style="font-size:12px;color:var(--text-secondary);margin-top:3px;">Insights from the extraction process</p>
-          </div>
+        <div style="display:flex;justify-content:flex-end;margin-bottom:14px;">
           <button class="btn btn-primary" onclick="loadAll()">📊 Refresh Charts</button>
         </div>
         <div class="analytics-grid" id="analyticsGrid" style="grid-template-columns: 1fr;">
@@ -645,10 +622,7 @@ admin_reply</pre>
 
       <!-- Data Management Page -->
       <div class="page" id="page-manage">
-        <div class="section-header" style="margin-bottom: 12px;">
-          <div><h2>Data Management</h2><p>Select and edit individual FAQ groups</p></div>
-        </div>
-        <div style="margin-top:0px;display:flex;justify-content:space-between;align-items:center;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
           <div style="display:flex; align-items:center; gap:12px;">
             <button class="btn btn-ghost" id="selectAllBtn" onclick="toggleSelectAll()">☑ Select All</button>
             <div id="editGroupDropdownContainer" style="position:relative; display:inline-block;">
@@ -698,11 +672,7 @@ admin_reply</pre>
 
       <!-- 3D Visualization Page -->
       <div class="page" id="page-viz">
-        <div class="section-header" style="margin-bottom:14px">
-          <div>
-            <h2>3D Cluster Visualization</h2>
-            <p>FAQ data points in semantic space — drag to rotate · scroll to zoom · hover for details</p>
-          </div>
+        <div style="display:flex;justify-content:flex-end;margin-bottom:14px;">
           <button class="btn btn-ghost" onclick="initVisualization()" style="font-size:12px;padding:7px 14px;">↻ Reload</button>
         </div>
         <div class="viz-layout">
@@ -798,7 +768,9 @@ admin_reply</pre>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
-<script src="app.js"></script>
-<script src="viz.js"></script>
+<script>
+  document.write('<script src="app.js?v=' + Date.now() + '"><\/script>');
+  document.write('<script src="viz.js?v=' + Date.now() + '"><\/script>');
+</script>
 </body>
 </html>

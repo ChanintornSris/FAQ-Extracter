@@ -294,6 +294,21 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.requests import Request as StarletteRequest
+
+    class NoCacheHTMLMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: StarletteRequest, call_next):
+            response = await call_next(request)
+            ct = response.headers.get("content-type", "")
+            if "text/html" in ct or request.url.path.endswith((".js", ".css")):
+                response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+                response.headers["Pragma"] = "no-cache"
+                response.headers["Expires"] = "0"
+            return response
+
+    app.add_middleware(NoCacheHTMLMiddleware)
+
     # ── Pydantic models ────────────────────────────────────────────────────────
 
     class SearchRequest(BaseModel):
